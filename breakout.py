@@ -149,12 +149,14 @@ class BreakoutEnv:
         model.load_weights("model.h5")
         model.compile(loss='mse', optimizer='rmsprop', metrics=['accuracy'])
         game_over = False
-        s = self.get_frame()
+        state = self.init_state_frame()
         while not game_over:
-            q = model.predict(s)
+            q = model.predict(np.reshape(state, (1, 4, 84, 84)))
             action = np.argmax(q[0])
-            self.k_steps(action)
-            s = self.get_frame()
+            [self.step(action) for _ in range(4)]
+            next_state = self.get_frame()
+            next_state = np.append(state[1:, :, :], next_state, axis=0)
+            state = next_state
 
     def step(self, action=None):
         # msElapsed = self.clock.tick(144)
