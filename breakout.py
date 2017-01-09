@@ -26,7 +26,7 @@ class QLearning:
     def __init__(self, num_actions=3, load=False):
         self.load = load
         self.epsilon = 1.0
-        self.start_train_frames = 10000
+        self.start_train_frames = 1000
         self.max_memory = 50000
         self.batch_size = 32
         self.model = None
@@ -61,9 +61,9 @@ class QLearning:
     def random_action(self):
         return np.random.randint(0, 3, size=1)
 
-    def get_test_action(self):
-        if random.random() > 0.05:
-            q = model.predict(np.array([state]))
+    def get_test_action(self, state):
+        if np.random.rand() > 0.05:
+            q = self.model.predict(np.array([state]))
             action = np.argmax(q[0])
         else:
             action = np.random.randint(0, 3, size=1)
@@ -78,7 +78,7 @@ class QLearning:
                 action = np.argmax(q[0])
             return action
 
-        if random.random() < self.epsilon:
+        if np.random.rand() < self.epsilon:
             action = np.random.randint(0, 3, size=1)
         else:
             q = self.model.predict(np.array([state]))
@@ -124,9 +124,9 @@ class QLearning:
     def train(self, data):
         self.replay(data)
         loss = 0
-        # if self.t % 4 == 0:
-        inputs, targets = self.get_batch()
-        loss = self.model.train_on_batch(inputs, targets)
+        if self.t % 4 == 0:
+            inputs, targets = self.get_batch()
+            loss = self.model.train_on_batch(inputs, targets)
         if self.t % 1000 == 0:
             self.model.save_weights("model.h5", overwrite=True)
             with open("model.json", "w") as outfile:
@@ -151,7 +151,7 @@ class BreakoutEnv:
 
     def observe(self):
         reward = self.score["score"]
-        reward = reward / (self.max_lives - self.score["lives"] + 1)
+        reward -= self.score["lives"]
         game_over = False
         if self.score["score"] >= len(self.entities_initial):
             # reward = 1000
@@ -199,7 +199,7 @@ class BreakoutEnv:
                 self.initialise()
 
         loss = 0
-        for e in range(77):
+        for e in range(50):
             game_over = False
             for train_step in range(250000):
                 action = agent.get_action(state)
@@ -211,6 +211,7 @@ class BreakoutEnv:
                 state = next_state
                 if game_over:
                     print(agent.epsilon)
+                    print(reward)
                     self.initialise()
             print("episode : ", e)
 
@@ -220,9 +221,9 @@ class BreakoutEnv:
         game_over = False
         state = self.init_state_frame()
         for i in range(1000):
-            action = agent.get_test_action()
-            for i in range(random.randint(2,4)):
-                self.step(action)
+            action = agent.get_test_action(state)
+            self.act(action)
+            reward, game_over = self.observe()
             next_state = self.get_frame()
             next_state = np.append(state[1:, :, :], next_state, axis=0)
             if game_over:
