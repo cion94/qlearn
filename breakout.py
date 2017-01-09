@@ -6,49 +6,88 @@ import numpy as np
 from keras.models import Sequential
 from keras.layers import Dense, Activation, Convolution2D, Flatten
 from keras.models import model_from_json
-from skimage.color import rgb2gray
+from keras.optimizers import RMSprop
+from skimage.color import rgb2grey
 
 black = (0, 0, 0)
 red = (255, 0, 0)
 blue = (0, 0, 255)
 white = (255, 255, 255)
 
+colors = [((6-j)*40, j*40, j*40) for j in range(6)]
+
+LOAD_FILE = False
+
+tw = 40
+th = 40
+
 
 class QLearning:
-    def __init__(self, num_actions=3):
+    def __init__(self, num_actions=3, load=False):
+        self.load = load
         self.epsilon = 1.0
-        self.train_timestep = 4
-        self.random_replay_frames = 20000
-        self.max_memory = 100000
+        self.start_train_frames = 10000
+        self.max_memory = 50000
         self.batch_size = 32
         self.model = None
         self.num_actions = num_actions
         self.memory = []
-        self.discount = 0.99
+        self.discount = 0.9
         self.loss = 0
         self.conv_model()
         self.t = 0
+        self.epsilon_step = 0.9 / 10000
 
     def conv_model(self):
-        self.model = Sequential()
-        self.model.add(Convolution2D(32, 8, 8, subsample=(4, 4), input_shape=(4, 84, 84), dim_ordering='th'))
-        self.model.add(Activation("relu"))
-        self.model.add(Convolution2D(64, 4, 4, subsample=(2, 2), activation='relu'))
-        self.model.add(Convolution2D(64, 3, 3, subsample=(1, 1), activation='relu'))
-        self.model.add(Flatten())
-        self.model.add(Dense(512, activation='relu'))
-        self.model.add(Dense(self.num_actions))
-        self.model.compile(loss='mse', optimizer='rmsprop', metrics=['accuracy'])
+        if self.load is True:
+            with open("model.json", "r") as jfile:
+                self.model = model_from_json(json.load(jfile))
+            self.model.load_weights("model.h5")
+            rmsprop = RMSprop(lr=0.001, rho=0.9, epsilon=1e-08, decay=0.0)
+            self.model.compile(loss='mean_squared_error', optimizer=rmsprop, metrics=['accuracy'])
+            print("model loaded!")
+        else:
+            self.model = Sequential()
+            self.model.add(Convolution2D(32, 4, 4, subsample=(2, 2), init="normal", input_shape=(4, tw, th), dim_ordering='th'))
+            self.model.add(Activation("relu"))
+            self.model.add(Convolution2D(64, 4, 4, subsample=(2, 2), init="normal", activation='relu', dim_ordering='th'))
+            self.model.add(Convolution2D(64, 3, 3, subsample=(1, 1), init="normal", activation='relu', dim_ordering='th'))
+            self.model.add(Flatten())
+            self.model.add(Dense(512, init="normal", activation='relu'))
+            self.model.add(Dense(self.num_actions, init="normal"))
+            rmsprop = RMSprop(lr=0.001, rho=0.9, epsilon=1e-08, decay=0.0)
+            self.model.compile(loss='mean_squared_error', optimizer=rmsprop, metrics=['accuracy'])
+
+    def random_action(self):
+        return np.random.randint(0, 3, size=1)
+
+    def get_test_action(self):
+        if random.random() > 0.05:
+            q = model.predict(np.array([state]))
+            action = np.argmax(q[0])
+        else:
+            action = np.random.randint(0, 3, size=1)
+        return action
 
     def get_action(self, state):
-        if np.random.rand() <= self.epsilon or self.t < self.random_replay_frames:
-            action = np.random.randint(0, self.num_actions, size=1)
-        else:
-            q = self.model.predict(np.reshape(state, (1, 4, 84, 84)))
-            action = np.argmax(q[0])
+        if LOAD_FILE is True:
+            if np.random.rand() <= 0.1:
+                action = np.random.randint(0, 3, size=1)
+            else:
+                q = self.model.predict(np.array([state]))
+                action = np.argmax(q[0])
+            return action
 
-        if self.epsilon > 0.1 and self.t >= self.random_replay_frames:
-            self.epsilon -= 9e-7
+        if random.random() < self.epsilon:
+            action = np.random.randint(0, 3, size=1)
+        else:
+            q = self.model.predict(np.array([state]))
+            action = np.argmax(q[0])
+            if self.t % 100 == 0:
+                print(q[0])
+
+        if self.epsilon > 0.1:
+            self.epsilon -= self.epsilon_step
 
         return action
 
@@ -58,35 +97,47 @@ class QLearning:
         self.memory.append(data)
 
     def get_batch(self):
-        memory_size = len(self.memory)
-        batch_indices = np.random.randint(0, memory_size, self.batch_size)
-        inputs = np.float32(np.array([self.memory[i][0] for i in batch_indices]) / 255.0)
+        batches = random.sample(self.memory, self.batch_size)
+        inputs = []
+        actions = []
+        rewards = []
+        new_states = []
+        game_over = []
+        for b in batches:
+            inputs.append(b[0])
+            actions.append(b[1])
+            rewards.append(b[2])
+            new_states.append(b[3])
+            game_over.append(b[4])
 
-        targets = np.zeros((self.batch_size, self.num_actions))
-        for i, idx in enumerate(batch_indices):
-            state, action, reward, new_state, game_over = self.memory[idx]
-            targets[i] = self.model.predict(np.float32(np.reshape(state, (1, 4, 84, 84)) / 255.0))[0]
-            q = np.max(self.model.predict(np.float32(np.reshape(new_state, (1, 4, 84, 84)) / 255.0))[0])
-            if game_over:
-                targets[i, action] = reward
+        inputs = np.array(inputs)
+        new_states = np.array(new_states)
+        targets = self.model.predict(inputs)
+        qs = self.model.predict(new_states)
+        for i in range(len(batches)):
+            if game_over[i]:
+                targets[i, actions[i]] = rewards[i]
             else:
-                targets[i, action] = reward + self.discount * q
-        # inputs = np.reshape(inputs, [self.batch_size, 4, 84, 84])
+                targets[i, actions[i]] = rewards[i] + self.discount * np.max(qs[i])
         return inputs, targets
 
     def train(self, data):
         self.replay(data)
-
-        if self.t >= self.random_replay_frames:
-            if self.t % self.train_timestep == 0:
-                inputs, targets = self.get_batch()
-                self.loss = self.model.train_on_batch(inputs, targets)
-            if self.t % 300000 == 0:
-                self.model.save_weights("model.h5", overwrite=True)
-                with open("model.json", "w") as outfile:
-                    json.dump(self.model.to_json(), outfile)
+        loss = 0
+        # if self.t % 4 == 0:
+        inputs, targets = self.get_batch()
+        loss = self.model.train_on_batch(inputs, targets)
+        if self.t % 1000 == 0:
+            self.model.save_weights("model.h5", overwrite=True)
+            with open("model.json", "w") as outfile:
+                json.dump(self.model.to_json(), outfile)
 
         self.t += 1
+        return loss
+
+
+def weightedAverage(pixel):
+    return 0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2]
 
 
 class BreakoutEnv:
@@ -98,64 +149,84 @@ class BreakoutEnv:
             self.start_ticks = pygame.time.get_ticks()
         return last_score, last_lives, seconds
 
-    def observe(self, score, lives, seconds):
-        reward = 0
-        if self.score["score"] - score > 0:
-            reward = 1
-        if self.score["lives"] - lives < 0:
-            reward = -1
+    def observe(self):
+        reward = self.score["score"]
+        reward = reward / (self.max_lives - self.score["lives"] + 1)
         game_over = False
         if self.score["score"] >= len(self.entities_initial):
-            reward = 1
+            # reward = 1000
             game_over = True
-        if self.score["lives"] <= 0:
-            reward = -1
+        elif self.score["lives"] == 0:
+            # reward = -100
             game_over = True
         return reward, game_over
 
     def init_state_frame(self):
-        pygame.transform.scale(self.screen, (84, 84), self.pixel_state)
         arr = pygame.surfarray.pixels3d(self.pixel_state)
-        processed_observation = np.uint8(rgb2gray(arr) * 255)
-        state = [processed_observation for _ in range(4)]
-        return np.stack(state, axis=0)
+        grey = np.zeros((tw, th), dtype=np.float32)
+        for rownum in range(len(arr)):
+            for colnum in range(len(arr[rownum])):
+                grey[rownum][colnum] = weightedAverage(arr[rownum][colnum])
+        state = [grey for _ in range(4)]
+        return np.array(state) / 255.0
 
     def get_frame(self):
-        pygame.transform.scale(self.screen, (84, 84), self.pixel_state)
         arr = pygame.surfarray.pixels3d(self.pixel_state)
-        arr = np.uint8(rgb2gray(arr) * 255)
-        return np.reshape(arr, (1, 84, 84))
+        grey = np.zeros((tw, th), dtype=np.float32)
+        for rownum in range(len(arr)):
+            for colnum in range(len(arr[rownum])):
+                grey[rownum][colnum] = weightedAverage(arr[rownum][colnum])
+        state = [grey]
+        return np.array(state) / 255.0
+
+    def act(self, action):
+        for i in range(random.randint(2,4)):
+            self.step(action)
 
     def train_agent(self):
-        agent = QLearning()
-        for e in range(12000):
+        agent = QLearning(load=LOAD_FILE)
+        
+        self.initialise()
+        state = self.init_state_frame()
+        for random_steps in range(agent.start_train_frames):
+            action = agent.random_action()
+            self.act(action)
+            reward, game_over = self.observe()
+            next_state = self.get_frame()
+            next_state = np.append(state[1:, :, :], next_state, axis=0)
+            agent.replay((state, action, reward, next_state, game_over))
+            if game_over:
+                self.initialise()
+
+        loss = 0
+        for e in range(77):
             game_over = False
-            self.initialise()
-            state = self.init_state_frame()
-            while not game_over:
-                score, lives, seconds = self.change()
+            for train_step in range(250000):
                 action = agent.get_action(state)
-                [self.step(action) for _ in range(4)]
-                reward, game_over = self.observe(score, lives, seconds)
+                self.act(action)
+                reward, game_over = self.observe()
                 next_state = self.get_frame()
                 next_state = np.append(state[1:, :, :], next_state, axis=0)
                 agent.train((state, action, reward, next_state, game_over))
                 state = next_state
+                if game_over:
+                    print(agent.epsilon)
+                    self.initialise()
+            print("episode : ", e)
 
     def play(self):
         self.initialise()
-        with open("model.json", "r") as jfile:
-            model = model_from_json(json.load(jfile))
-        model.load_weights("model.h5")
-        model.compile(loss='mse', optimizer='rmsprop', metrics=['accuracy'])
+        agent = QLearning(load=True)
         game_over = False
         state = self.init_state_frame()
-        while not game_over:
-            q = model.predict(np.reshape(state, (1, 4, 84, 84)))
-            action = np.argmax(q[0])
-            [self.step(action) for _ in range(4)]
+        for i in range(1000):
+            action = agent.get_test_action()
+            for i in range(random.randint(2,4)):
+                self.step(action)
             next_state = self.get_frame()
             next_state = np.append(state[1:, :, :], next_state, axis=0)
+            if game_over:
+                self.initialise()
             state = next_state
 
     def step(self, action=None):
@@ -173,7 +244,7 @@ class BreakoutEnv:
             self.paddle[0] = min(self.w - self.paddle[2], self.paddle[0])
 
         if self.score["lives"] == 0:
-            self.initialise()
+            pass
         else:
             self.update()
 
@@ -181,12 +252,13 @@ class BreakoutEnv:
 
     def draw(self):
         self.screen.fill(black)
-        pygame.draw.rect(self.screen, red, self.paddle, 0)
+        pygame.draw.rect(self.screen, (50,200,50), self.paddle, 0)
         for shape in self.entities:
-            pygame.draw.rect(self.screen, blue, shape, 0)
-            pygame.draw.rect(self.screen, black, shape, 1)
+            pygame.draw.rect(self.screen, colors[shape[-1]], shape[:-1], 0)
+            # pygame.draw.rect(self.screen, black, shape, 1)
         new_ball = [int(self.ball[0]), int(self.ball[1])]
         pygame.draw.circle(self.screen, white, new_ball, self.radius)
+        pygame.transform.scale(self.screen, (tw, th), self.pixel_state)
         pygame.display.update()
         # write the score and lives
         '''myfont = pygame.font.SysFont("monospace", 15)
@@ -197,9 +269,9 @@ class BreakoutEnv:
 
     def update(self):
         self.prev = np.array(self.ball)
+        self.ball_vel = np.clip(self.ball_vel, -4, 4)
         self.ball += self.ball_vel
         self.ball_collision()
-        self.ball_vel = np.clip(self.ball_vel, -4, 4)
 
     def ball_collision(self):
         ball = self.ball
@@ -212,32 +284,28 @@ class BreakoutEnv:
             ball_vel[1] *= -1
             return
         if ball[1] > self.h:
-            self.ball_vel = np.array([1, 2])
+            temp = [-0.5, 0.5]
+            self.ball_vel = np.array([temp[random.randint(0,1)], 2])
             self.ball = list(self.ball_initial)
             self.paddle = list(self.paddle_initial)
             self.score["lives"] -= 1
             return
 
         # paddle collision
+        self.paddle_collision = False
         if ball[0] + radius < self.paddle[0] \
                 or ball[0] - radius > self.paddle[0] + self.paddle[2] \
                 or ball[1] + radius < self.paddle[1] \
                 or ball[1] - radius > self.paddle[1] + self.paddle[3]:
             pass
         else:
+            self.paddle_collision = True
             paddle = self.paddle
             if self.prev[1] + radius < paddle[1] \
                     or self.prev[1] - radius > paddle[1] + paddle[3]:
                 if ball[0] < paddle[0] + 0.1 * paddle[2] or ball[0] > paddle[0] + 0.9 * self.paddle[2]:
                     ball_vel[0] *= -1
                     ball_vel[1] = 1
-                    if ball_vel[0] < 0:
-                        ball_vel[0] = -3
-                    else:
-                        ball_vel[0] = 3
-                elif ball[0] < paddle[0] + 0.3 * paddle[2] or ball[0] > paddle[0] + 0.7 * paddle[2]:
-                    ball_vel[0] *= -2
-                    ball_vel[1] = 2
                     if ball_vel[0] < 0:
                         ball_vel[0] = -2
                     else:
@@ -262,17 +330,16 @@ class BreakoutEnv:
                     elif older[0] + radius < brick[0] or older[0] - radius > brick[0] + brick[2]:
                         ball_vel[0] *= -1
                         break
-                ball_vel[0] += ball_vel[0] * 0.1
-                ball_vel[1] += ball_vel[1] * 0.1
+                # ball_vel[0] += ball_vel[0] * 0.1
+                # ball_vel[1] += ball_vel[1] * 0.1
                 brick[0] = self.w + 100
-                self.score["score"] += 1
+                self.score["score"] += (7-brick[4])
 
-    def __init__(self, train=False):
-        self.train = train
+    def __init__(self):
         self.w, self.h = 640, 480
         pw = 0.15 * self.w
         ph = 0.05 * self.h
-        bw = self.w / 16
+        bw = self.w / 10
         bh = 16
         pygame.init()
         self.clock = pygame.time.Clock()
@@ -280,12 +347,12 @@ class BreakoutEnv:
         pygame.display.set_caption('Breakout')
         pygame.mouse.set_visible(0)
         # game objects
-        self.speed = 6
+        self.speed = 2
         self.radius = 6
         self.score = dict()
-        self.entities_initial = [[i * bw, (j + 5) * bh, bw, bh] for i in range(16) for j in range(6)]
+        self.entities_initial = [[i * bw, (j + 5) * bh, bw, bh] for i in range(10) for j in range(5)]
         self.ball = np.array([0, 0])
-        self.ball_initial = (int(self.w / 2 - pw / 2), int(self.h / 2 - ph / 2))
+        self.ball_initial = (int(self.w / 2 - self.radius/2), int(self.h / 2 - self.radius/2))
         self.ball_vel = np.array([0, 0])
         ball_surface = pygame.Surface((2 * self.radius, 2 * self.radius))
         ball_surface.fill(black)
@@ -299,21 +366,24 @@ class BreakoutEnv:
         self.entities = None
         self.timer = 0
         self.start_ticks = 0
-        self.pixel_state = pygame.Surface((84, 84))
+        self.pixel_state = pygame.Surface((tw, th))
         self.surf = None
+        self.paddle_collision = False
+        self.max_lives = 5
 
     def initialise(self):
-        self.score["lives"] = 3
+        self.score["lives"] = self.max_lives
         self.score["score"] = 0
         self.start_ticks = pygame.time.get_ticks()
         self.paddle = list(self.paddle_initial)
-        self.ball = np.array(self.ball_initial)
-        self.ball_vel = np.array([random.randint(-1, 1), 2])
-        bw = self.w / 16
+        self.ball = np.array(self.ball_initial, dtype=np.float32)
+        temp = [-0.5, 0.5]
+        self.ball_vel = np.array([temp[random.randint(0,1)], 2])
+        bw = self.w / 10
         bh = 16
-        self.entities = [[i * bw, (j + 5) * bh, bw, bh] for i in range(16) for j in range(6)]
+        self.entities = [[i * bw, (j + 5) * bh, bw, bh, j] for i in range(10) for j in range(6)]
 
 
 if __name__ == "__main__":
-    br = BreakoutEnv(train=True)
+    br = BreakoutEnv()
     br.train_agent()
