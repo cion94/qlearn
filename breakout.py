@@ -8,6 +8,7 @@ from keras.layers import Dense, Activation, Convolution2D, Flatten
 from keras.models import model_from_json
 from keras.optimizers import RMSprop
 from skimage.color import rgb2grey
+from collections import deque
 
 black = (0, 0, 0)
 red = (255, 0, 0)
@@ -18,8 +19,8 @@ colors = [((6-j)*40, j*40, j*40) for j in range(6)]
 
 LOAD_FILE = False
 
-tw = 40
-th = 40
+tw = 84
+th = 84
 
 
 class QLearning:
@@ -27,12 +28,12 @@ class QLearning:
         self.load = load
         self.epsilon = 1.0
         self.start_train_frames = 1000
-        self.max_memory = 50000
+        self.max_memory = 40000
         self.batch_size = 32
         self.model = None
         self.num_actions = num_actions
-        self.memory = []
-        self.discount = 0.9
+        self.memory = deque()
+        self.discount = 0.99
         self.loss = 0
         self.conv_model()
         self.t = 0
@@ -43,30 +44,30 @@ class QLearning:
             with open("model.json", "r") as jfile:
                 self.model = model_from_json(json.load(jfile))
             self.model.load_weights("model.h5")
-            rmsprop = RMSprop(lr=0.001, rho=0.9, epsilon=1e-08, decay=0.0)
+            rmsprop = RMSprop(lr=0.00025, rho=0.9, epsilon=1e-08, decay=0.95)
             self.model.compile(loss='mean_squared_error', optimizer=rmsprop, metrics=['accuracy'])
             print("model loaded!")
         else:
             self.model = Sequential()
-            self.model.add(Convolution2D(32, 4, 4, subsample=(2, 2), init="normal", input_shape=(4, tw, th), dim_ordering='th'))
+            self.model.add(Convolution2D(32, 4, 4, subsample=(4, 4), init="normal", input_shape=(4, tw, th), dim_ordering='th'))
             self.model.add(Activation("relu"))
             self.model.add(Convolution2D(64, 4, 4, subsample=(2, 2), init="normal", activation='relu', dim_ordering='th'))
             self.model.add(Convolution2D(64, 3, 3, subsample=(1, 1), init="normal", activation='relu', dim_ordering='th'))
             self.model.add(Flatten())
             self.model.add(Dense(512, init="normal", activation='relu'))
             self.model.add(Dense(self.num_actions, init="normal"))
-            rmsprop = RMSprop(lr=0.001, rho=0.9, epsilon=1e-08, decay=0.0)
+            rmsprop = RMSprop(lr=0.00025, rho=0.9, epsilon=1e-08, decay=0.95)
             self.model.compile(loss='mean_squared_error', optimizer=rmsprop, metrics=['accuracy'])
 
     def random_action(self):
         return np.random.randint(0, 3, size=1)
 
     def get_test_action(self, state):
-        if np.random.rand() > 0.05:
+        if np.random.rand() <= 0.1:
+            action = np.random.randint(0, 3, size=1)
+        else:
             q = self.model.predict(np.array([state]))
             action = np.argmax(q[0])
-        else:
-            action = np.random.randint(0, 3, size=1)
         return action
 
     def get_action(self, state):
@@ -93,7 +94,7 @@ class QLearning:
 
     def replay(self, data):
         if len(self.memory) + 1 > self.max_memory:
-            del self.memory[0]
+            self.memory.popleft()
         self.memory.append(data)
 
     def get_batch(self):
@@ -125,8 +126,9 @@ class QLearning:
         self.replay(data)
         loss = 0
         if self.t % 4 == 0:
-            inputs, targets = self.get_batch()
-            loss = self.model.train_on_batch(inputs, targets)
+            for i in range(4):
+                inputs, targets = self.get_batch()
+                loss = self.model.train_on_batch(inputs, targets)[0]
         if self.t % 1000 == 0:
             self.model.save_weights("model.h5", overwrite=True)
             with open("model.json", "w") as outfile:
@@ -151,12 +153,9 @@ class BreakoutEnv:
 
     def observe(self):
         reward = self.score["score"]
-        reward -= self.score["lives"]
+        reward -= 2*self.score["lives"]
         game_over = False
-        if self.score["score"] >= len(self.entities_initial):
-            # reward = 1000
-            game_over = True
-        elif self.score["lives"] == 0:
+        if self.score["lives"] == 0:
             # reward = -100
             game_over = True
         return reward, game_over
@@ -180,7 +179,7 @@ class BreakoutEnv:
         return np.array(state) / 255.0
 
     def act(self, action):
-        for i in range(random.randint(2,4)):
+        for i in range(4):
             self.step(action)
 
     def train_agent(self):
@@ -198,20 +197,25 @@ class BreakoutEnv:
             if game_over:
                 self.initialise()
 
-        loss = 0
         for e in range(50):
             game_over = False
-            for train_step in range(250000):
+            rewardless = 0
+            loss = 0
+            for train_step in range(100000):
                 action = agent.get_action(state)
                 self.act(action)
                 reward, game_over = self.observe()
                 next_state = self.get_frame()
                 next_state = np.append(state[1:, :, :], next_state, axis=0)
-                agent.train((state, action, reward, next_state, game_over))
+                loss += agent.train((state, action, reward, next_state, game_over))
                 state = next_state
                 if game_over:
-                    print(agent.epsilon)
-                    print(reward)
+                    print("epsilon {:.4f}, loss {:.4f} , reward {}".format(agent.epsilon, loss, reward))
+                    if reward < 2:
+                        rewardless += 1
+                    if rewardless > 5 and agent.epsilon < 0.12:
+                        rewardless = 0
+                        agent.epsilon = 1.0
                     self.initialise()
             print("episode : ", e)
 
@@ -253,14 +257,14 @@ class BreakoutEnv:
 
     def draw(self):
         self.screen.fill(black)
-        pygame.draw.rect(self.screen, (50,200,50), self.paddle, 0)
+        pygame.draw.rect(self.screen, (255, 100, 0), self.paddle, 0)
         for shape in self.entities:
             pygame.draw.rect(self.screen, colors[shape[-1]], shape[:-1], 0)
             # pygame.draw.rect(self.screen, black, shape, 1)
         new_ball = [int(self.ball[0]), int(self.ball[1])]
         pygame.draw.circle(self.screen, white, new_ball, self.radius)
-        pygame.transform.scale(self.screen, (tw, th), self.pixel_state)
         pygame.display.update()
+        pygame.transform.scale(self.screen, (tw, th), self.pixel_state)
         # write the score and lives
         '''myfont = pygame.font.SysFont("monospace", 15)
         label = myfont.render("Score:" + str(self.score["score"]), 1, (255, 255, 0))
@@ -285,8 +289,8 @@ class BreakoutEnv:
             ball_vel[1] *= -1
             return
         if ball[1] > self.h:
-            temp = [-0.5, 0.5]
-            self.ball_vel = np.array([temp[random.randint(0,1)], 2])
+            temp = [-3, 3]
+            self.ball_vel = np.array([temp[random.randint(0,1)], 1])
             self.ball = list(self.ball_initial)
             self.paddle = list(self.paddle_initial)
             self.score["lives"] -= 1
@@ -337,9 +341,9 @@ class BreakoutEnv:
                 self.score["score"] += (7-brick[4])
 
     def __init__(self):
-        self.w, self.h = 640, 480
-        pw = 0.15 * self.w
-        ph = 0.05 * self.h
+        self.w, self.h = 480, 480
+        pw = 0.20 * self.w
+        ph = 0.02 * self.h
         bw = self.w / 10
         bh = 16
         pygame.init()
@@ -348,12 +352,12 @@ class BreakoutEnv:
         pygame.display.set_caption('Breakout')
         pygame.mouse.set_visible(0)
         # game objects
-        self.speed = 2
+        self.speed = 5
         self.radius = 6
         self.score = dict()
         self.entities_initial = [[i * bw, (j + 5) * bh, bw, bh] for i in range(10) for j in range(5)]
         self.ball = np.array([0, 0])
-        self.ball_initial = (int(self.w / 2 - self.radius/2), int(self.h / 2 - self.radius/2))
+        self.ball_initial = (int(self.w / 2 - self.radius/2), int(self.h / 2 - 20))
         self.ball_vel = np.array([0, 0])
         ball_surface = pygame.Surface((2 * self.radius, 2 * self.radius))
         ball_surface.fill(black)
@@ -378,8 +382,8 @@ class BreakoutEnv:
         self.start_ticks = pygame.time.get_ticks()
         self.paddle = list(self.paddle_initial)
         self.ball = np.array(self.ball_initial, dtype=np.float32)
-        temp = [-0.5, 0.5]
-        self.ball_vel = np.array([temp[random.randint(0,1)], 2])
+        temp = [-3, 3]
+        self.ball_vel = np.array([temp[random.randint(0,1)], 1])
         bw = self.w / 10
         bh = 16
         self.entities = [[i * bw, (j + 5) * bh, bw, bh, j] for i in range(10) for j in range(6)]
