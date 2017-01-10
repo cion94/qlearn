@@ -9,6 +9,7 @@ from keras.models import model_from_json
 from keras.optimizers import RMSprop
 from skimage.color import rgb2grey
 from collections import deque
+from matplotlib import pyplot as plt
 
 black = (0, 0, 0)
 red = (255, 0, 0)
@@ -166,6 +167,8 @@ class BreakoutEnv:
         for rownum in range(len(arr)):
             for colnum in range(len(arr[rownum])):
                 grey[rownum][colnum] = weightedAverage(arr[rownum][colnum])
+        #plt.imshow(arr, interpolation='nearest')
+        #plt.show()
         state = [grey for _ in range(4)]
         return np.array(state) / 255.0
 
@@ -186,9 +189,14 @@ class BreakoutEnv:
         agent = QLearning(load=LOAD_FILE)
         
         self.initialise()
+        self.act(1)
         state = self.init_state_frame()
+
         for random_steps in range(agent.start_train_frames):
-            action = agent.random_action()
+            if LOAD_FILE is False:
+                action = agent.random_action()
+            else:
+                action = agent.get_action(state)
             self.act(action)
             reward, game_over = self.observe()
             next_state = self.get_frame()
@@ -223,16 +231,19 @@ class BreakoutEnv:
         self.initialise()
         agent = QLearning(load=True)
         game_over = False
+        self.initialise()
+        self.act(1)
         state = self.init_state_frame()
-        for i in range(1000):
-            action = agent.get_test_action(state)
-            self.act(action)
-            reward, game_over = self.observe()
-            next_state = self.get_frame()
-            next_state = np.append(state[1:, :, :], next_state, axis=0)
-            if game_over:
-                self.initialise()
-            state = next_state
+        for i in range(10):
+            while not game_over:
+                action = agent.get_test_action(state)
+                self.act(action)
+                reward, game_over = self.observe()
+                next_state = self.get_frame()
+                next_state = np.append(state[1:, :, :], next_state, axis=0)
+                if game_over:
+                    self.initialise()
+                state = next_state
 
     def step(self, action=None):
         # msElapsed = self.clock.tick(144)
@@ -241,12 +252,19 @@ class BreakoutEnv:
                 pygame.quit()
                 sys.exit()
 
+        keys=pygame.key.get_pressed()
+        if keys[pygame.K_LEFT]:
+            self.paddle[0] -= self.speed
+        if keys[pygame.K_RIGHT]:
+            self.paddle[0] += self.speed
+
         if action == 0:
             self.paddle[0] -= self.speed
-            self.paddle[0] = max(0, self.paddle[0])
         if action == 2:
             self.paddle[0] += self.speed
-            self.paddle[0] = min(self.w - self.paddle[2], self.paddle[0])
+            
+        self.paddle[0] = max(0, self.paddle[0])
+        self.paddle[0] = min(self.w - self.paddle[2], self.paddle[0])
 
         if self.score["lives"] == 0:
             pass
